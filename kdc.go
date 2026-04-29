@@ -13,19 +13,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jcmturner/gokrb5/v8/client"
-	"github.com/jcmturner/gokrb5/v8/config"
-	"github.com/jcmturner/gokrb5/v8/crypto"
-	"github.com/jcmturner/gokrb5/v8/iana"
-	"github.com/jcmturner/gokrb5/v8/iana/errorcode"
-	"github.com/jcmturner/gokrb5/v8/iana/etypeID"
-	"github.com/jcmturner/gokrb5/v8/iana/keyusage"
-	"github.com/jcmturner/gokrb5/v8/iana/msgtype"
-	"github.com/jcmturner/gokrb5/v8/iana/nametype"
-	"github.com/jcmturner/gokrb5/v8/iana/patype"
-	"github.com/jcmturner/gokrb5/v8/keytab"
-	"github.com/jcmturner/gokrb5/v8/messages"
-	"github.com/jcmturner/gokrb5/v8/types"
+	"github.com/go-krb5/krb5/client"
+	"github.com/go-krb5/krb5/config"
+	"github.com/go-krb5/krb5/crypto"
+	"github.com/go-krb5/krb5/iana"
+	"github.com/go-krb5/krb5/iana/errorcode"
+	"github.com/go-krb5/krb5/iana/etypeID"
+	"github.com/go-krb5/krb5/iana/keyusage"
+	"github.com/go-krb5/krb5/iana/msgtype"
+	"github.com/go-krb5/krb5/iana/nametype"
+	"github.com/go-krb5/krb5/iana/patype"
+	"github.com/go-krb5/krb5/keytab"
+	"github.com/go-krb5/krb5/messages"
+	"github.com/go-krb5/krb5/types"
 )
 
 const (
@@ -45,9 +45,9 @@ type KDC struct {
 	UDPListener net.PacketConn
 	errChan     chan error
 	udpWg       sync.WaitGroup
-	udpClose    chan interface{}
+	udpClose    chan struct{}
 	tcpWg       sync.WaitGroup
-	tcpClose    chan interface{}
+	tcpClose    chan struct{}
 }
 
 type PrincipalDetails struct {
@@ -56,13 +56,17 @@ type PrincipalDetails struct {
 	Client   *client.Client
 }
 
-func NewKDC(principals map[string][]string, l *log.Logger) (*KDC, error) {
+func NewKDC(principals map[string][]string, l *log.Logger, opts ...KDCOption) (*KDC, error) {
 	kdc := new(KDC)
 	kdc.Realm = strings.ToUpper(srealm)
 	kdc.Logger = l
 	kdc.errChan = make(chan error, 1)
-	kdc.udpClose = make(chan interface{})
-	kdc.tcpClose = make(chan interface{})
+	kdc.udpClose = make(chan struct{})
+	kdc.tcpClose = make(chan struct{})
+
+	for _, opt := range opts {
+		opt(kdc)
+	}
 
 	go func() {
 		for err := range kdc.errChan {
@@ -76,9 +80,11 @@ func NewKDC(principals map[string][]string, l *log.Logger) (*KDC, error) {
 	}
 
 	var err error
-	kdc.TCPListener, err = net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, fmt.Errorf("could not create TCP listener: %v", err)
+	if kdc.TCPListener == nil {
+		kdc.TCPListener, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, fmt.Errorf("could not create TCP listener: %v", err)
+		}
 	}
 	kdc.UDPListener, err = net.ListenPacket("udp", kdc.TCPListener.Addr().String())
 	if err != nil {
@@ -175,7 +181,7 @@ func (k *KDC) goServeTCP() {
 				k.Logger.Printf("TCP connection established: from=%s", conn.RemoteAddr().String())
 				k.tcpWg.Add(1)
 				go func() {
-					defer conn.Close()
+					defer func() { _ = conn.Close() }()
 					defer k.tcpWg.Done()
 					deadline := time.Now().Add(time.Second * 10)
 					err := conn.SetDeadline(deadline)
@@ -185,7 +191,7 @@ func (k *KDC) goServeTCP() {
 					}
 
 					// RFC 4120 7.2.2 specifies the first 4 bytes indicate the length of the message in big endian order.
-					sh := make([]byte, 4, 4)
+					sh := make([]byte, 4)
 					_, err = conn.Read(sh)
 					if err != nil {
 						k.errChan <- fmt.Errorf("serving=%s: %v", conn.RemoteAddr().String(), err)
@@ -193,7 +199,7 @@ func (k *KDC) goServeTCP() {
 					}
 					s := binary.BigEndian.Uint32(sh)
 
-					ib := make([]byte, s, s)
+					ib := make([]byte, s)
 					n, err := io.ReadFull(conn, ib)
 					if err != nil {
 						k.errChan <- fmt.Errorf("serving=%s: %v", conn.RemoteAddr().String(), err)
@@ -211,7 +217,7 @@ func (k *KDC) goServeTCP() {
 					}
 
 					// Add the size header
-					rb := make([]byte, 4, 4)
+					rb := make([]byte, 4)
 					binary.BigEndian.PutUint32(rb, uint32(len(ob)))
 					rb = append(rb, ob...)
 
@@ -255,7 +261,7 @@ func (k *KDC) goServeUDP() {
 						k.errChan <- fmt.Errorf("serving=%s: %v", addr, err)
 						return
 					}
-					ib := make([]byte, n, n)
+					ib := make([]byte, n)
 					copy(ib, udpbuf)
 
 					ob, err := k.getResponseBytes(ib, addr)
@@ -276,7 +282,7 @@ func (k *KDC) goServeUDP() {
 	}()
 }
 
-//msgType returns the kerberos message type ID for the bytes received
+// msgType returns the kerberos message type ID for the bytes received
 func mType(b []byte) (int, error) {
 	var m asn1.RawValue
 	_, err := asn1.Unmarshal(b, &m)
@@ -290,7 +296,7 @@ func mType(b []byte) (int, error) {
 }
 
 // getResponseBytes returns the appropriate response bytes for the bytes recieved
-func (kdc *KDC) getResponseBytes(b []byte, cAddr net.Addr) ([]byte, error) {
+func (k *KDC) getResponseBytes(b []byte, cAddr net.Addr) ([]byte, error) {
 	mt, err := mType(b)
 	if err != nil {
 		return []byte{}, err
@@ -300,44 +306,44 @@ func (kdc *KDC) getResponseBytes(b []byte, cAddr net.Addr) ([]byte, error) {
 		m := new(messages.ASReq)
 		err := m.Unmarshal(b)
 		if err != nil {
-			return kdc.krbError(errorcode.KRB_ERR_GENERIC, err)
+			return k.krbError(errorcode.KRB_ERR_GENERIC, err)
 		}
-		return kdc.asRep(m, cAddr)
+		return k.asRep(m, cAddr)
 	case msgtype.KRB_TGS_REQ:
 		m := new(messages.TGSReq)
 		err := m.Unmarshal(b)
 		if err != nil {
-			return kdc.krbError(errorcode.KRB_ERR_GENERIC, err)
+			return k.krbError(errorcode.KRB_ERR_GENERIC, err)
 		}
-		return kdc.tgsRep(m, cAddr)
+		return k.tgsRep(m, cAddr)
 	default:
-		kdc.Logger.Printf("received message that was neither AS_REQ or TGS_REQ: from=%v", cAddr)
-		return kdc.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("unsupported message type (%d) recieved", mt))
+		k.Logger.Printf("received message that was neither AS_REQ or TGS_REQ: from=%v", cAddr)
+		return k.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("unsupported message type (%d) recieved", mt))
 	}
 }
 
-func (kdc *KDC) krbError(errorCode int32, err error) ([]byte, error) {
-	m := messages.NewKRBError(kdc.SName, kdc.Realm, errorCode, err.Error())
+func (k *KDC) krbError(errorCode int32, err error) ([]byte, error) {
+	m := messages.NewKRBError(k.SName, k.Realm, errorCode, err.Error())
 	b, _ := m.Marshal()
 	return b, m
 }
 
-func (kdc *KDC) asRep(req *messages.ASReq, cAddr net.Addr) ([]byte, error) {
-	kdc.Logger.Printf("AS_REQ from=%s: %+v", cAddr, *req)
-	etype := kdc.selectTktEtype(req)
+func (k *KDC) asRep(req *messages.ASReq, cAddr net.Addr) ([]byte, error) {
+	k.Logger.Printf("AS_REQ from=%s: %+v", cAddr, *req)
+	etype := k.selectTktEtype(req)
 	if etype == 0 {
-		return kdc.krbError(errorcode.KDC_ERR_ETYPE_NOSUPP, errors.New("cannot agree on enctype to use"))
+		return k.krbError(errorcode.KDC_ERR_ETYPE_NOSUPP, errors.New("cannot agree on enctype to use"))
 	}
-	kdc.Logger.Printf("AS_REQ from=%s: selected enctype %d", cAddr, etype)
+	k.Logger.Printf("AS_REQ from=%s: selected enctype %d", cAddr, etype)
 
 	t := time.Now().UTC()
-	endTime := t.Add(kdc.KRB5Conf.LibDefaults.TicketLifetime)
-	renewTime := t.Add(kdc.KRB5Conf.LibDefaults.RenewLifetime)
-	tkt, skey, err := messages.NewTicket(req.ReqBody.CName, kdc.Realm, kdc.SName, kdc.Realm,
-		kdc.KRB5Conf.LibDefaults.KDCDefaultOptions, kdc.Keytab,
+	endTime := t.Add(k.KRB5Conf.LibDefaults.TicketLifetime)
+	renewTime := t.Add(k.KRB5Conf.LibDefaults.RenewLifetime)
+	tkt, skey, err := messages.NewTicket(req.ReqBody.CName, k.Realm, k.SName, k.Realm,
+		k.KRB5Conf.LibDefaults.KDCDefaultOptions, k.Keytab,
 		etype, 0, t, t, endTime, renewTime)
 	if err != nil {
-		return kdc.krbError(errorcode.KRB_ERR_GENERIC, err)
+		return k.krbError(errorcode.KRB_ERR_GENERIC, err)
 	}
 
 	// The encpart of the asRep is encrypted with the users keytab
@@ -348,24 +354,24 @@ func (kdc *KDC) asRep(req *messages.ASReq, cAddr net.Addr) ([]byte, error) {
 			LRValue: time.Time{},
 		}},
 		Nonce:     req.ReqBody.Nonce,
-		Flags:     kdc.KRB5Conf.LibDefaults.KDCDefaultOptions,
+		Flags:     k.KRB5Conf.LibDefaults.KDCDefaultOptions,
 		AuthTime:  t,
 		EndTime:   endTime,
 		RenewTill: renewTime,
 		SRealm:    req.ReqBody.Realm,
-		SName:     kdc.SName,
+		SName:     k.SName,
 	}
-	key, kvno, err := kdc.Keytab.GetEncryptionKey(req.ReqBody.CName, kdc.Realm, 0, etype)
+	key, kvno, err := k.Keytab.GetEncryptionKey(req.ReqBody.CName, k.Realm, 0, etype)
 	if err != nil {
-		return kdc.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error getting user's encryption key: %v", err))
+		return k.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error getting user's encryption key: %v", err))
 	}
 	b, err := encPart.Marshal()
 	if err != nil {
-		return kdc.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error marshaling AS_REP encpart: %v", err))
+		return k.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error marshaling AS_REP encpart: %v", err))
 	}
 	encData, err := crypto.GetEncryptedData(b, key, keyusage.AS_REP_ENCPART, kvno)
 	if err != nil {
-		return kdc.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error encrypting AS_REP encpart: %v", err))
+		return k.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error encrypting AS_REP encpart: %v", err))
 	}
 
 	m := messages.ASRep{
@@ -373,100 +379,98 @@ func (kdc *KDC) asRep(req *messages.ASReq, cAddr net.Addr) ([]byte, error) {
 			PVNO:    iana.PVNO,
 			MsgType: msgtype.KRB_AS_REP,
 			PAData:  []types.PAData{},
-			CRealm:  kdc.Realm,
+			CRealm:  k.Realm,
 			CName:   req.ReqBody.CName,
 			Ticket:  tkt,
 			EncPart: encData,
 		},
 	}
-	kdc.Logger.Printf("AS_REQ from=%s: AS_REP generated %+v", cAddr, m)
+	k.Logger.Printf("AS_REQ from=%s: AS_REP generated %+v", cAddr, m)
 	mb, err := m.Marshal()
 	if err != nil {
-		return kdc.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error marshaling AS_REP: %v", err))
+		return k.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error marshaling AS_REP: %v", err))
 	}
 	return mb, nil
 }
 
-func (kdc *KDC) tgsRep(req *messages.TGSReq, cAddr net.Addr) ([]byte, error) {
-	kdc.Logger.Printf("AS_REQ from=%s: %+v", cAddr, *req)
+func (k *KDC) tgsRep(req *messages.TGSReq, cAddr net.Addr) ([]byte, error) {
+	k.Logger.Printf("AS_REQ from=%s: %+v", cAddr, *req)
 	// Get the AP_REQ from the PA data
 	var apReq messages.APReq
 	for _, pa := range req.PAData {
 		if pa.PADataType == patype.PA_TGS_REQ {
 			err := apReq.Unmarshal(pa.PADataValue)
 			if err != nil {
-				return kdc.krbError(errorcode.KDC_ERR_PADATA_TYPE_NOSUPP,
+				return k.krbError(errorcode.KDC_ERR_PADATA_TYPE_NOSUPP,
 					fmt.Errorf("could not unmarshal PA_TGS_REQ: %v", err))
 			}
 		}
 	}
 	if apReq.PVNO == 0 {
-		return kdc.krbError(errorcode.KDC_ERR_BAD_PVNO, errors.New("could not find PA_TGS_REQ in padata"))
+		return k.krbError(errorcode.KDC_ERR_BAD_PVNO, errors.New("could not find PA_TGS_REQ in padata"))
 	}
 
 	// Validate the authenticator checksum. This also decrypts the enc part of the TGT within
 	h, err := types.GetHostAddress(cAddr.String())
 	if err != nil {
-		return kdc.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("could not get client host address: %v", err))
+		return k.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("could not get client host address: %v", err))
 	}
-	ok, err := apReq.Verify(kdc.Keytab, time.Minute*5, h, nil)
+
+	ok, err := apReq.Verify(k.Keytab, time.Minute*5, h, nil)
 	if err != nil {
-		kerr, ok := err.(messages.KRBError)
-		if ok {
+		var kerr messages.KRBError
+		if ok := errors.As(err, &kerr); ok {
 			b, _ := kerr.Marshal()
 			return b, err
 		}
-		return kdc.krbError(errorcode.KRB_AP_ERR_BAD_INTEGRITY, fmt.Errorf("could not verify AP_REQ: %v", err))
+		return k.krbError(errorcode.KRB_AP_ERR_BAD_INTEGRITY, fmt.Errorf("could not verify AP_REQ: %v", err))
 	}
 	if !ok {
-		return kdc.krbError(errorcode.KRB_AP_ERR_BAD_INTEGRITY, errors.New("failed to validate AP_REQ"))
+		return k.krbError(errorcode.KRB_AP_ERR_BAD_INTEGRITY, errors.New("failed to validate AP_REQ"))
 	}
 
-	etype := kdc.selectTGSEtype(req)
+	etype := k.selectTGSEtype(req)
 	if etype == 0 {
-		return kdc.krbError(errorcode.KDC_ERR_ETYPE_NOSUPP, errors.New("cannot agree on enctype to use"))
+		return k.krbError(errorcode.KDC_ERR_ETYPE_NOSUPP, errors.New("cannot agree on enctype to use"))
 	}
-	kdc.Logger.Printf("TGS_REQ from=%s: selected enctype %d", cAddr, etype)
+	k.Logger.Printf("TGS_REQ from=%s: selected enctype %d", cAddr, etype)
 
 	// Check authenticator checksum
 	b, err := req.ReqBody.Marshal()
 	if err != nil {
-		return kdc.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("could not get request body bytes: %v", err))
+		return k.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("could not get request body bytes: %v", err))
 	}
 	et, err := crypto.GetEtype(etype)
 	if err != nil {
-		return kdc.krbError(errorcode.KDC_ERR_PADATA_TYPE_NOSUPP, fmt.Errorf("could not get etype: %v", err))
+		return k.krbError(errorcode.KDC_ERR_PADATA_TYPE_NOSUPP, fmt.Errorf("could not get etype: %v", err))
 	}
 	ok = et.VerifyChecksum(apReq.Ticket.DecryptedEncPart.Key.KeyValue, b, apReq.Authenticator.Cksum.Checksum, keyusage.TGS_REQ_PA_TGS_REQ_AP_REQ_AUTHENTICATOR_CHKSUM)
 	if !ok {
-		return kdc.krbError(errorcode.KRB_AP_ERR_MODIFIED, fmt.Errorf("checksum of TGS_REQ not valid %v", err))
+		return k.krbError(errorcode.KRB_AP_ERR_MODIFIED, fmt.Errorf("checksum of TGS_REQ not valid %v", err))
 	}
 
 	tkt, skey, err := messages.NewTicket(req.ReqBody.CName, req.ReqBody.Realm, req.ReqBody.SName, req.ReqBody.Realm,
-		kdc.KRB5Conf.LibDefaults.KDCDefaultOptions, kdc.Keytab, etype, 0,
+		k.KRB5Conf.LibDefaults.KDCDefaultOptions, k.Keytab, etype, 0,
 		apReq.Ticket.DecryptedEncPart.AuthTime,
 		apReq.Ticket.DecryptedEncPart.StartTime,
 		apReq.Ticket.DecryptedEncPart.EndTime,
 		apReq.Ticket.DecryptedEncPart.RenewTill)
 	if err != nil {
-		return kdc.krbError(errorcode.KRB_ERR_GENERIC, err)
+		return k.krbError(errorcode.KRB_ERR_GENERIC, err)
 	}
 
 	// The encpart of the asRep is encrypted with the users keytab
 	encPart := messages.EncKDCRepPart{
-		Key: skey,
-		LastReqs: []messages.LastReq{messages.LastReq{
-			LRType:  0,
-			LRValue: time.Time{},
-		}},
+		Key:       skey,
+		LastReqs:  []messages.LastReq{{}},
 		Nonce:     req.ReqBody.Nonce,
-		Flags:     kdc.KRB5Conf.LibDefaults.KDCDefaultOptions,
+		Flags:     k.KRB5Conf.LibDefaults.KDCDefaultOptions,
 		AuthTime:  apReq.Ticket.DecryptedEncPart.AuthTime,
 		StartTime: apReq.Ticket.DecryptedEncPart.StartTime,
 		EndTime:   apReq.Ticket.DecryptedEncPart.EndTime,
 		RenewTill: apReq.Ticket.DecryptedEncPart.RenewTill,
 		SRealm:    req.ReqBody.Realm,
-		SName:     kdc.SName,
+		SName:     k.SName,
 	}
 	key := apReq.Authenticator.SubKey
 	usage := keyusage.TGS_REP_ENCPART_AUTHENTICATOR_SUB_KEY
@@ -476,11 +480,11 @@ func (kdc *KDC) tgsRep(req *messages.TGSReq, cAddr net.Addr) ([]byte, error) {
 	}
 	b, err = encPart.Marshal()
 	if err != nil {
-		return kdc.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error marshaling TGS_REP encpart: %v", err))
+		return k.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error marshaling TGS_REP encpart: %v", err))
 	}
 	encData, err := crypto.GetEncryptedData(b, key, uint32(usage), 0)
 	if err != nil {
-		return kdc.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error encrypting TGS_REP encpart: %v", err))
+		return k.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error encrypting TGS_REP encpart: %v", err))
 	}
 
 	m := messages.TGSRep{
@@ -488,23 +492,23 @@ func (kdc *KDC) tgsRep(req *messages.TGSReq, cAddr net.Addr) ([]byte, error) {
 			PVNO:    iana.PVNO,
 			MsgType: msgtype.KRB_TGS_REP,
 			PAData:  []types.PAData{},
-			CRealm:  kdc.Realm,
+			CRealm:  k.Realm,
 			CName:   req.ReqBody.CName,
 			Ticket:  tkt,
 			EncPart: encData,
 		},
 	}
-	kdc.Logger.Printf("TGS_REQ from=%s: TGS_REP generated %+v", cAddr, m)
+	k.Logger.Printf("TGS_REQ from=%s: TGS_REP generated %+v", cAddr, m)
 	mb, err := m.Marshal()
 	if err != nil {
-		return kdc.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error marshaling AS_REP: %v", err))
+		return k.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("error marshaling AS_REP: %v", err))
 	}
 	return mb, nil
 }
 
-func (kdc *KDC) selectTktEtype(req *messages.ASReq) int32 {
+func (k *KDC) selectTktEtype(req *messages.ASReq) int32 {
 	for _, id := range req.ReqBody.EType {
-		for _, kdcId := range kdc.KRB5Conf.LibDefaults.DefaultTktEnctypeIDs {
+		for _, kdcId := range k.KRB5Conf.LibDefaults.DefaultTktEnctypeIDs {
 			if id == kdcId {
 				return id
 			}
@@ -513,9 +517,9 @@ func (kdc *KDC) selectTktEtype(req *messages.ASReq) int32 {
 	return 0
 }
 
-func (kdc *KDC) selectTGSEtype(req *messages.TGSReq) int32 {
+func (k *KDC) selectTGSEtype(req *messages.TGSReq) int32 {
 	for _, id := range req.ReqBody.EType {
-		for _, kdcId := range kdc.KRB5Conf.LibDefaults.DefaultTGSEnctypeIDs {
+		for _, kdcId := range k.KRB5Conf.LibDefaults.DefaultTGSEnctypeIDs {
 			if id == kdcId {
 				return id
 			}

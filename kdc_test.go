@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jcmturner/gokrb5/v8/client"
-	"github.com/jcmturner/gokrb5/v8/iana"
+	"github.com/go-krb5/krb5/client"
+	"github.com/go-krb5/krb5/iana"
 )
 
 func TestNewKDC(t *testing.T) {
