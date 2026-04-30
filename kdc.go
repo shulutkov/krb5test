@@ -125,23 +125,66 @@ func NewKDC(principals map[string][]string, l *log.Logger, opts ...KDCOption) (*
 		Password: pwd,
 	}
 
+	var kvno uint8 = 2
 	// Generate passwords and keytabs for the desired principals
 	for p, d := range principals {
-		g := make([]string, len(d), len(d))
-		copy(g, d)
 		pwd := randomString(10)
-		err := kdc.Keytab.AddEntry(p, kdc.Realm, pwd, time.Now().UTC(), 1, encTypeID)
+		err := kdc.Keytab.AddEntry(p, kdc.Realm, pwd, time.Now().UTC(), kvno, encTypeID)
 		if err != nil {
 			return nil, fmt.Errorf("error generating test keytab: %v", err)
 		}
 		cl := client.NewWithKeytab(p, kdc.Realm, kdc.Keytab, kdc.KRB5Conf, client.Logger(l))
 		kdc.Principals[p] = PrincipalDetails{
 			Password: pwd,
-			Groups:   g,
+			Groups:   d,
 			Client:   cl,
 		}
+
+		kvno++
 	}
 	return kdc, nil
+}
+
+type keytabEntry struct {
+	kvno8     uint8
+	encTypeID int32
+	now       time.Time
+}
+
+func (k *KDC) NewKeytab(principals ...string) (*keytab.Keytab, error) {
+	if len(principals) == 0 {
+		return nil, fmt.Errorf("no principals specified")
+	}
+
+	keytabEntries := make(map[string]keytabEntry)
+	for _, entry := range k.Keytab.Entries {
+		principal := strings.Join(entry.Principal.Components, "/")
+		keytabEntries[principal] = keytabEntry{
+			kvno8:     entry.KVNO8,
+			encTypeID: entry.Key.KeyType,
+			now:       entry.Timestamp,
+		}
+	}
+
+	kt := keytab.New()
+	for _, p := range principals {
+		pd, ok := k.Principals[p]
+		if !ok {
+			return nil, fmt.Errorf("could not find principal %s", p)
+		}
+
+		entry, ok := keytabEntries[p]
+		if !ok {
+			return nil, fmt.Errorf("could not find entry for %s", p)
+		}
+
+		err := kt.AddEntry(p, k.Realm, pd.Password, entry.now, entry.kvno8, entry.encTypeID)
+		if err != nil {
+			return nil, fmt.Errorf("error generating keytab: %s: %v", p, err)
+		}
+	}
+
+	return kt, nil
 }
 
 func (k *KDC) Start() {
@@ -528,7 +571,7 @@ func (k *KDC) selectTGSEtype(req *messages.TGSReq) int32 {
 	return 0
 }
 
-const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 func randomString(n int) string {
 	b := make([]byte, n)
