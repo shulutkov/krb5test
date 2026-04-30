@@ -170,17 +170,17 @@ func (k *KDC) NewKeytab(principals ...string) (*keytab.Keytab, error) {
 	for _, p := range principals {
 		pd, ok := k.Principals[p]
 		if !ok {
-			return nil, fmt.Errorf("could not find principal %s", p)
+			return nil, fmt.Errorf("could not find principal %q", p)
 		}
 
 		entry, ok := keytabEntries[p]
 		if !ok {
-			return nil, fmt.Errorf("could not find entry for %s", p)
+			return nil, fmt.Errorf("could not find entry for %q", p)
 		}
 
 		err := kt.AddEntry(p, k.Realm, pd.Password, entry.now, entry.kvno8, entry.encTypeID)
 		if err != nil {
-			return nil, fmt.Errorf("error generating keytab: %s: %v", p, err)
+			return nil, fmt.Errorf("error generating keytab: %q: %v", p, err)
 		}
 	}
 
