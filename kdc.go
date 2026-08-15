@@ -483,7 +483,7 @@ func (k *KDC) tgsRep(req *messages.TGSReq, cAddr net.Addr) ([]byte, error) {
 	if err != nil {
 		return k.krbError(errorcode.KRB_ERR_GENERIC, fmt.Errorf("could not get request body bytes: %v", err))
 	}
-	et, err := crypto.GetEtype(etype)
+	et, err := crypto.GetEType(etype)
 	if err != nil {
 		return k.krbError(errorcode.KDC_ERR_PADATA_TYPE_NOSUPP, fmt.Errorf("could not get etype: %v", err))
 	}
