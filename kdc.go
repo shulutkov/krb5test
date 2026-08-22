@@ -512,8 +512,12 @@ func (k *KDC) tgsRep(req *messages.TGSReq, cAddr net.Addr) ([]byte, error) {
 		StartTime: apReq.Ticket.DecryptedEncPart.StartTime,
 		EndTime:   apReq.Ticket.DecryptedEncPart.EndTime,
 		RenewTill: apReq.Ticket.DecryptedEncPart.RenewTill,
-		SRealm:    req.ReqBody.Realm,
-		SName:     k.SName,
+		// The encrypted part names the service the TICKET was issued for (RFC 4120 §5.4.2: sname
+		// and srealm "are the same as those in the ticket"). It used to name the KDC's own
+		// principal, which every client accepted until go-krb5 began checking the two against each
+		// other (go-krb5/krb5#149) and refused every service ticket this KDC issued.
+		SRealm: req.ReqBody.Realm,
+		SName:  req.ReqBody.SName,
 	}
 	key := apReq.Authenticator.SubKey
 	usage := keyusage.TGS_REP_ENCPART_AUTHENTICATOR_SUB_KEY

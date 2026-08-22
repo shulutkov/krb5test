@@ -2,7 +2,7 @@ module github.com/shulutkov/krb5test
 
 go 1.25.0
 
-require github.com/go-krb5/krb5 v0.1.1-0.20260821133123-3647ca97f148
+require github.com/go-krb5/krb5 v0.1.1-0.20260822030741-7b3360ef1519
 
 require (
 	github.com/go-crypt/x v0.4.16 // indirect
